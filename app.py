@@ -1,7 +1,7 @@
 import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 # הגדרת עיצוב עמוד ואייקון בדפדפן
 st.set_page_config(page_title="#TOYS - ניהול חנות", page_icon="🧸", layout="wide")
@@ -69,6 +69,102 @@ def change_password_screen():
                 except Exception as e:
                     st.error(f"שגיאה בעדכון הסיסמה: {e}")
 
+# ---------- משמרות ----------
+# סוגי המשמרות. כרגע רק בוקר; להוספת משמרת ערב מוסיפים כאן שורה.
+SHIFT_TYPES = {
+    "morning": {"label": "בוקר", "start": "10:00", "end": "16:00"},
+}
+HE_DAYS = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"]
+
+def week_start_for(day: date) -> date:
+    """יום ראשון של השבוע שבו נמצא התאריך."""
+    return day - timedelta(days=(day.weekday() + 1) % 7)
+
+def shifts_screen(user):
+    st.title("סידור עבודה")
+    is_admin = user["role"] == "admin"
+
+    # מעבר בין שבועות
+    if "week_offset" not in st.session_state:
+        st.session_state.week_offset = 0
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if st.button("שבוע קודם", icon=":material/chevron_right:"):
+            st.session_state.week_offset -= 1
+            st.rerun()
+        if st.button("השבוע"):
+            st.session_state.week_offset = 0
+            st.rerun()
+        if st.button("שבוע הבא", icon=":material/chevron_left:"):
+            st.session_state.week_offset += 1
+            st.rerun()
+
+    start = week_start_for(date.today()) + timedelta(weeks=st.session_state.week_offset)
+    days = [start + timedelta(days=i) for i in range(7)]
+    st.subheader(f"{days[0]:%d/%m} – {days[6]:%d/%m/%Y}")
+
+    try:
+        rows = supabase.rpc("get_week_shifts", {"week_start": start.isoformat()}).execute().data or []
+    except Exception as e:
+        st.error(f"שגיאה בטעינת המשמרות: {e}")
+        rows = []
+
+    # שיבוץ חדש - למנהלת בלבד
+    if is_admin:
+        with st.expander("שיבוץ עובד למשמרת", icon=":material/add:"):
+            try:
+                employees = supabase.rpc("admin_list_users").execute().data or []
+            except Exception as e:
+                employees = []
+                st.error(f"שגיאה בטעינת העובדים: {e}")
+            if employees:
+                with st.form("assign_shift", clear_on_submit=True):
+                    emp_labels = {emp["full_name"]: emp["id"] for emp in employees}
+                    emp = st.selectbox("עובד", list(emp_labels.keys()))
+                    day = st.selectbox("יום", days, format_func=lambda d: f"{HE_DAYS[days.index(d)]} {d:%d/%m}")
+                    shift_type = st.segmented_control(
+                        "משמרת", list(SHIFT_TYPES.keys()),
+                        format_func=lambda k: f"{SHIFT_TYPES[k]['label']} ({SHIFT_TYPES[k]['start']}–{SHIFT_TYPES[k]['end']})",
+                        default=list(SHIFT_TYPES.keys())[0], required=True,
+                    )
+                    if st.form_submit_button("שבץ", width="stretch"):
+                        t = SHIFT_TYPES[shift_type]
+                        try:
+                            supabase.rpc("admin_assign_shift", {
+                                "target_user_id": emp_labels[emp],
+                                "p_date": day.isoformat(),
+                                "p_type": shift_type,
+                                "p_start": t["start"],
+                                "p_end": t["end"],
+                            }).execute()
+                            st.toast(f"{emp} שובץ/ה ליום {HE_DAYS[days.index(day)]}.", icon=":material/check:")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"שגיאה בשיבוץ: {e}")
+
+    # תצוגה שבועית: כרטיס לכל יום (מתאים לטלפון)
+    for i, d in enumerate(days):
+        day_rows = [r for r in rows if r["shift_date"] == d.isoformat()]
+        with st.container(border=True):
+            title = f"**{HE_DAYS[i]}** {d:%d/%m}"
+            if d == date.today():
+                title += "  :blue-badge[היום]"
+            st.markdown(title)
+            if not day_rows:
+                st.caption("אין משמרות")
+            for r in day_rows:
+                label = SHIFT_TYPES.get(r["shift_type"], {}).get("label", r["shift_type"])
+                hours = f"{str(r['start_time'])[:5]}–{str(r['end_time'])[:5]}"
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    who = f"{r['full_name']} · " if is_admin else ""
+                    st.markdown(f"{who}{label} {hours}")
+                    if is_admin and st.button("בטל", key=f"cancel_{r['shift_id']}",
+                                              icon=":material/close:", type="tertiary"):
+                        try:
+                            supabase.rpc("admin_cancel_shift", {"p_shift_id": r["shift_id"]}).execute()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"שגיאה בביטול: {e}")
+
 def show_logo(width=250):
     try:
         left, center, right = st.columns([1, 1, 1])
@@ -121,10 +217,9 @@ def login_screen():
                     "password": new_pwd
                 })
                 if auth_res.user:
-                    supabase.table("users").update({
-                        "is_registered": True,
-                        "auth_id": auth_res.user.id
-                    }).eq("id", st.session_state.temp_user['user_id']).execute()
+                    supabase.rpc("complete_registration", {
+                        "p_user_id": st.session_state.temp_user['user_id']
+                    }).execute()
                     
                     st.success("הסיסמה הוגדרה בהצלחה! מתחבר...")
                     st.session_state.user = load_user_profile(st.session_state.temp_user)
@@ -156,36 +251,51 @@ elif st.session_state.user.get("must_change_password"):
 else:
     user = st.session_state.user
     
-    try:
-        st.sidebar.image("logo.png", width=200)
-    except Exception as e:
-        st.sidebar.caption(f"הלוגו לא נטען: {e}")
-        
-    st.sidebar.write(f"שלום, **{user['full_name']}**")
-    st.sidebar.write(f"תפקיד: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
-    
-    if st.sidebar.button("התנתק"):
+    # כותרת עליונה: לוגו, שלום ותפקיד, כפתור התנתקות.
+    # הכל בעמוד הראשי ולא בסרגל הצדי, כי בטלפון הסרגל הצדי מוסתר.
+    with st.container(horizontal=True, vertical_alignment="center"):
         try:
-            supabase.auth.sign_out()
-        except Exception:
-            pass
-        st.session_state.user = None
-        st.rerun()
+            st.image("logo.png", width=90)
+        except Exception as e:
+            st.caption(f"הלוגו לא נטען: {e}")
+        st.markdown(f"שלום, **{user['full_name']}**  \n"
+                    f"{'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
+        if st.button("התנתק", icon=":material/logout:"):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            st.session_state.user = None
+            st.rerun()
 
-    menu = ["לוח בקרה", "משמרות", "משימות", "דיווח מכירות"]
+    # תפריט ניווט בכפתורים, נשבר לשורות בטלפון
+    menu = {
+        "לוח בקרה": ":material/dashboard:",
+        "משמרות": ":material/calendar_month:",
+        "משימות": ":material/task_alt:",
+        "דיווח מכירות": ":material/payments:",
+    }
     if user['role'] == 'admin':
-        menu.append("ניהול עובדים (Admin)")
-        menu.append("סוכן AI חכם")
-        
-    choice = st.sidebar.selectbox("תפריט ניווט", menu)
+        menu["ניהול עובדים (Admin)"] = ":material/group:"
+        menu["סוכן AI חכם"] = ":material/smart_toy:"
+
+    choice = st.pills(
+        "תפריט ניווט",
+        list(menu.keys()),
+        format_func=lambda name: f"{menu[name]} {name}",
+        default="לוח בקרה",
+        required=True,
+        key="nav",
+        label_visibility="collapsed",
+    )
+    st.divider()
 
     if choice == "לוח בקרה":
         st.title("📊 ברוכים הבאים למערכת ניהול החנות #TOYS")
         st.write("כאן תוכלו לראות סיכומים מהירים, משימות פתוחות ועדכונים יומיים.")
 
     elif choice == "משמרות":
-        st.title("📅 סידור עבודה המשמרות")
-        st.write("ניהול וצפייה במשמרות השבועיות.")
+        shifts_screen(user)
 
     elif choice == "משימות":
         st.title("📝 משימות ומטלות")
@@ -199,12 +309,10 @@ else:
         
         if st.button("שמור דיווח"):
             try:
-                supabase.table("sales").upsert({
-                    "user_id": user['user_id'],
-                    "sale_date": str(datetime.now().date()),
-                    "total_amount": sales_amount,
-                    "transactions_count": trans_count,
-                    "notes": notes
+                supabase.rpc("submit_sales_report", {
+                    "p_amount": sales_amount,
+                    "p_count": int(trans_count),
+                    "p_notes": notes
                 }).execute()
                 st.success("הדיווח נשמר בהצלחה!")
             except Exception as e:
@@ -269,16 +377,13 @@ else:
         st.write("הסוכן האישי שלך לניתוח נתוני החנות, הפקת תובנות מכירות והמלצות לשיבוץ עובדים:")
         
         try:
-            sales_res = supabase.table("sales").select("*").execute()
-            sales_data = sales_res.data
-            
-            shifts_res = supabase.table("shifts").select("*").execute()
-            shifts_data = shifts_res.data
-            
-            users_res = supabase.table("users").select("*").execute()
-            users_data = users_res.data
+            dash = supabase.rpc("admin_dashboard_data").execute().data or {}
         except Exception as e:
-            sales_data, shifts_data, users_data = [], [], []
+            dash = {}
+            st.error(f"שגיאה בטעינת הנתונים: {e}")
+        sales_data = dash.get("sales") or []
+        users_data = dash.get("users") or []
+        active_shifts = dash.get("active_shifts") or 0
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -287,7 +392,7 @@ else:
         with col2:
             st.metric("עובדים רשומים", len(users_data) if users_data else 0)
         with col3:
-            st.metric("משמרות פעילות", len(shifts_data) if shifts_data else 0)
+            st.metric("משמרות קרובות", active_shifts)
 
         st.markdown("---")
         
