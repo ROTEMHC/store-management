@@ -15,17 +15,37 @@ def init_connection():
 
 supabase: Client = init_connection()
 
+# כתובת המייל הפנימית של כל עובד ב-Supabase Auth.
+# Supabase דוחה דומיינים לא אמיתיים (כמו store.local), לכן משתמשים בכתובת אמיתית
+# עם תוספת "+" (Gmail מתעלם ממה שאחרי ה-+). הכתובת שמורה ב-Secrets ולא בקוד.
+def auth_email(user_id):
+    base = st.secrets["AUTH_EMAIL_BASE"]  # לדוגמה: "yourname@gmail.com"
+    local, domain = base.split("@")
+    return f"{local}+{user_id}@{domain}"
+
+# כיווניות מימין לשמאל לכל האפליקציה
+st.markdown("""
+<style>
+.stApp, [data-testid="stSidebar"] { direction: rtl; text-align: right; }
+input, textarea { direction: rtl; text-align: right; }
+</style>
+""", unsafe_allow_html=True)
+
+def show_logo(width=250):
+    try:
+        left, center, right = st.columns([1, 1, 1])
+        with center:
+            st.image("logo.png", width=width)
+    except Exception:
+        pass
+
 # ניהול מצב התחברות (Session State)
 if "user" not in st.session_state:
     st.session_state.user = None
 
 def login_screen():
-    # הצגת לוגו החנות במסך ההתחברות
-    try:
-        st.image("logo.png", width=250)
-    except:
-        pass
-        
+    show_logo()
+
     st.title("התחברות למערכת ניהול חנות #TOYS")
     
     phone_input = st.text_input("הקלידי מספר טלפון:")
@@ -59,7 +79,7 @@ def login_screen():
         if st.button("הגדר סיסמה והתחבר"):
             try:
                 auth_res = supabase.auth.sign_up({
-                    "email": f"{st.session_state.temp_user['user_id']}@store.local",
+                    "email": auth_email(st.session_state.temp_user['user_id']),
                     "password": new_pwd
                 })
                 if auth_res.user:
@@ -81,7 +101,7 @@ def login_screen():
         if st.button("התחבר למערכת"):
             try:
                 auth_res = supabase.auth.sign_in_with_password({
-                    "email": f"{st.session_state.temp_user['user_id']}@store.local",
+                    "email": auth_email(st.session_state.temp_user['user_id']),
                     "password": pwd
                 })
                 if auth_res.user:
@@ -96,7 +116,6 @@ if not st.session_state.user:
 else:
     user = st.session_state.user
     
-    # --- הוספת הלוגו לראש סרגל הצד (Sidebar) ---
     try:
         st.sidebar.image("logo.png", use_container_width=True)
     except:
@@ -175,7 +194,6 @@ else:
         st.title("🤖 סוכן ניהול חכם (AI)")
         st.write("הסוכן האישי שלך לניתוח נתוני החנות, הפקת תובנות מכירות והמלצות לשיבוץ עובדים:")
         
-        # שליפת נתונים מ-Supabase עבור הסוכן
         try:
             sales_res = supabase.table("sales").select("*").execute()
             sales_data = sales_res.data
@@ -188,7 +206,6 @@ else:
         except Exception as e:
             sales_data, shifts_data, users_data = [], [], []
 
-        # תצוגת סיכום מהיר למנהל
         col1, col2, col3 = st.columns(3)
         with col1:
             total_sales = sum(item['total_amount'] for item in sales_data) if sales_data else 0
@@ -200,4 +217,28 @@ else:
 
         st.markdown("---")
         
-        # אזור התשאול של הסוכן
+        user_question = st.text_input("שאלי את הסוכן כל מה שתרצי על החנות (למשל: 'מה מצב המכירות?' או 'תנו לי המלצה לשיבוץ'):")
+        
+        if user_question:
+            with st.spinner("הסוכן מנתח את נתוני החנות..."):
+                q_lower = user_question.lower()
+                
+                if "מכירות" in q_lower or "כסף" in q_lower or "הכנסות" in q_lower or "דוחות" in q_lower:
+                    if sales_data:
+                        df_sales = pd.DataFrame(sales_data)
+                        st.success("📊 **ניתוח נתוני מכירות:**")
+                        st.dataframe(df_sales)
+                        st.info(f"סך כל המחזורים במערכת עומד על ₪{total_sales:,.2f} לאורך {len(sales_data)} דיווחים.")
+                    else:
+                        st.warning("עדיין לא הוזנו דיווחי מכירות במערכת.")
+                        
+                elif "עובדים" in q_lower or "צוות" in q_lower or "שיבוץ" in q_lower or "משמרות" in q_lower:
+                    if users_data:
+                        df_users = pd.DataFrame(users_data)
+                        st.success("👥 **מצבת כוח אדם ושיבוצים:**")
+                        st.dataframe(df_users[['full_name', 'phone', 'role', 'is_active']])
+                        st.info("💡 **המלצת הסוכן לשיבוץ:** מומלץ לוודא שלביקוש הגבוה בסופי השבוע יש לפחות 2 עובדים משובצים בכל משמרת לפחות 48 שעות מראש.")
+                    else:
+                        st.warning("אין עובדים רשומים כרגע מלבדך.")
+                else:
+                    st.success(f"🤖 **תשובת הסוכן:** ניתוח הנתונים המעודכן עבור החנות מראה על {len(users_data)} אנשי צוות ועל היקף פעילות יציב. מבדיקת השאלה שלך ('{user_question}'), ההמלצה המרכזית היא לעקוב מקרוב אחר דיווחי סוף המשמרת של העובדים ולוודא שכל המשימות מתבצעות בזמן.")
