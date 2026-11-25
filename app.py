@@ -6,14 +6,16 @@ from datetime import datetime
 # הגדרת עיצוב עמוד ואייקון בדפדפן
 st.set_page_config(page_title="#TOYS - ניהול חנות", page_icon="🧸", layout="wide")
 
-# חיבור ל-Supabase מתוך ה-Secrets של Streamlit
-@st.cache_resource
-def init_connection():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+# חיבור ל-Supabase מתוך ה-Secrets של Streamlit.
+# לכל משתמש (כל לשונית דפדפן) חיבור משלו, שמור ב-session_state.
+# אם החיבור היה משותף (cache_resource), כל המשתמשים היו עובדים מול ה-DB
+# בזהות של מי שהתחבר אחרון.
+def get_connection() -> Client:
+    if "sb" not in st.session_state:
+        st.session_state.sb = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    return st.session_state.sb
 
-supabase: Client = init_connection()
+supabase: Client = get_connection()
 
 # כתובת המייל הפנימית של כל עובד ב-Supabase Auth.
 # Supabase דוחה דומיינים לא אמיתיים (כמו store.local), לכן משתמשים בכתובת אמיתית
@@ -33,15 +35,39 @@ input, textarea { direction: rtl; text-align: right; }
 """, unsafe_allow_html=True)
 
 # הפונקציה check_phone_status מחזירה רק שם ומזהה, בלי תפקיד.
-# אחרי התחברות מוצלחת שולפים את פרטי העובד המלאים (כולל role) מטבלת users.
+# אחרי התחברות מוצלחת שולפים את פרטי המשתמש המחובר (כולל role וחובת החלפת סיסמה)
+# דרך הפונקציה get_my_profile ב-Supabase.
 def load_user_profile(temp_user):
-    res = supabase.table("users").select("id, full_name, role").eq("id", temp_user["user_id"]).single().execute()
+    res = supabase.rpc("get_my_profile").execute()
     row = res.data or {}
     return {
         "user_id": temp_user["user_id"],
         "full_name": row.get("full_name", temp_user.get("full_name", "")),
         "role": row.get("role", "employee"),
+        "must_change_password": bool(row.get("must_change_password", False)),
     }
+
+def change_password_screen():
+    show_logo()
+    st.title("החלפת סיסמה")
+    st.info(f"שלום {st.session_state.user['full_name']}! המנהל איפס את הסיסמה שלך. נא לבחור סיסמה חדשה כדי להמשיך.")
+    with st.form("change_password"):
+        new_pwd = st.text_input("סיסמה חדשה:", type="password")
+        confirm_pwd = st.text_input("אימות סיסמה:", type="password")
+        if st.form_submit_button("שמור סיסמה"):
+            if len(new_pwd) < 6:
+                st.warning("הסיסמה חייבת להכיל לפחות 6 תווים.")
+            elif new_pwd != confirm_pwd:
+                st.warning("הסיסמאות אינן תואמות.")
+            else:
+                try:
+                    supabase.auth.update_user({"password": new_pwd})
+                    supabase.rpc("clear_must_change_password").execute()
+                    st.session_state.user["must_change_password"] = False
+                    st.success("הסיסמה עודכנה בהצלחה!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"שגיאה בעדכון הסיסמה: {e}")
 
 def show_logo(width=250):
     try:
@@ -121,10 +147,12 @@ def login_screen():
                     del st.session_state.step
                     st.rerun()
             except Exception as e:
-                st.error("סיסמה שגויה או שגיאה בהתחברות.")
+                st.error(f"סיסמה שגויה או שגיאה בהתחברות. ({e})")
 
 if not st.session_state.user:
     login_screen()
+elif st.session_state.user.get("must_change_password"):
+    change_password_screen()
 else:
     user = st.session_state.user
     
@@ -137,6 +165,10 @@ else:
     st.sidebar.write(f"תפקיד: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
     
     if st.sidebar.button("התנתק"):
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
         st.session_state.user = None
         st.rerun()
 
@@ -201,6 +233,36 @@ else:
                         st.error(f"שגיאה בהוספת עובד: {e}")
                 else:
                     st.warning("נא למלא את כל השדות.")
+
+        st.markdown("---")
+        st.subheader("איפוס סיסמה לעובד")
+        st.caption("קובעים סיסמה זמנית ומוסרים אותה לעובד. בכניסה הבאה הוא יחויב לבחור סיסמה חדשה.")
+        try:
+            employees = supabase.rpc("admin_list_users").execute().data or []
+        except Exception as e:
+            employees = []
+            st.error(f"שגיאה בטעינת רשימת העובדים: {e}")
+
+        registered = [emp for emp in employees if emp.get("is_registered")]
+        if not registered:
+            st.info("אין עדיין עובדים שהגדירו סיסמה.")
+        else:
+            with st.form("reset_password"):
+                labels = {f"{emp['full_name']} ({emp['phone']})": emp["id"] for emp in registered}
+                chosen = st.selectbox("בחירת עובד", list(labels.keys()))
+                temp_pwd = st.text_input("סיסמה זמנית (לפחות 6 תווים)", type="password")
+                if st.form_submit_button("אפס סיסמה"):
+                    if len(temp_pwd) < 6:
+                        st.warning("הסיסמה הזמנית חייבת להכיל לפחות 6 תווים.")
+                    else:
+                        try:
+                            supabase.rpc("admin_set_temp_password", {
+                                "target_user_id": labels[chosen],
+                                "temp_password": temp_pwd
+                            }).execute()
+                            st.success(f"הסיסמה של {chosen} אופסה. מסרי לעובד את הסיסמה הזמנית.")
+                        except Exception as e:
+                            st.error(f"שגיאה באיפוס הסיסמה: {e}")
 
     elif choice == "סוכן AI חכם" and user['role'] == 'admin':
         st.title("🤖 סוכן ניהול חכם (AI)")
