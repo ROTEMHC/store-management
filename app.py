@@ -3,8 +3,8 @@ from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
 
-# הגדרת עיצוב עמוד
-st.set_page_config(page_title="ניהול חנות", page_icon="🛍️", layout="wide")
+# הגדרת עיצוב עמוד ואייקון בדפדפן
+st.set_page_config(page_title="#TOYS - ניהול חנות", page_icon="🧸", layout="wide")
 
 # חיבור ל-Supabase מתוך ה-Secrets של Streamlit
 @st.cache_resource
@@ -20,7 +20,13 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 def login_screen():
-    st.title("🛍️ התחברות למערכת ניהול חנות")
+    # הצגת לוגו החנות במסך ההתחברות
+    try:
+        st.image("logo.png", width=250)
+    except:
+        pass
+        
+    st.title("התחברות למערכת ניהול חנות #TOYS")
     
     phone_input = st.text_input("הקלידי מספר טלפון:")
     
@@ -31,7 +37,6 @@ def login_screen():
             return
             
         try:
-            # קריאה לפונקציית ה-RPC לבדיקת הטלפון בבסיס הנתונים
             res = supabase.rpc("check_phone_status", {"phone_input": clean_phone}).execute()
             data = res.data
             
@@ -48,19 +53,16 @@ def login_screen():
         except Exception as e:
             st.error(f"שגיאה בהתחברות: {e}")
 
-    # שלב יצירת סיסמה ראשונית
     if "step" in st.session_state and st.session_state.step == "set_password":
         st.info(f"שלום {st.session_state.temp_user['full_name']}! זוהי כניסתך הראשונה. נא להגדיר סיסמה:")
         new_pwd = st.text_input("בחר סיסמה חדשה:", type="password")
         if st.button("הגדר סיסמה והתחבר"):
             try:
-                # יצירת משתמש ב-Supabase Auth
                 auth_res = supabase.auth.sign_up({
                     "email": f"{st.session_state.temp_user['user_id']}@store.local",
                     "password": new_pwd
                 })
                 if auth_res.user:
-                    # עדכון טבלת המשתמשים שהם רשומים
                     supabase.table("users").update({
                         "is_registered": True,
                         "auth_id": auth_res.user.id
@@ -73,7 +75,6 @@ def login_screen():
             except Exception as e:
                 st.error(f"שגיאה בהגדרת סיסמה: {e}")
 
-    # שלב הזנת סיסמה למשתמש רשום
     if "step" in st.session_state and st.session_state.step == "enter_password":
         st.info(f"שלום {st.session_state.temp_user['full_name']}! נא להקליד סיסמה:")
         pwd = st.text_input("סיסמה:", type="password", key="login_pwd")
@@ -90,28 +91,33 @@ def login_screen():
             except Exception as e:
                 st.error("סיסמה שגויה או שגיאה בהתחברות.")
 
-# אם המשתמש לא מחובר, הצג את מסך ההתחברות
 if not st.session_state.user:
     login_screen()
 else:
     user = st.session_state.user
-    st.sidebar.title(f"שלום, {user['full_name']}")
-    st.sidebar.write(f"הוראה: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
+    
+    # --- הוספת הלוגו לראש סרגל הצד (Sidebar) ---
+    try:
+        st.sidebar.image("logo.png", use_container_width=True)
+    except:
+        pass
+        
+    st.sidebar.write(f"שלום, **{user['full_name']}**")
+    st.sidebar.write(f"תפקיד: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
     
     if st.sidebar.button("התנתק"):
         st.session_state.user = None
         st.rerun()
 
-    # תפריט ניווט ראשי
     menu = ["לוח בקרה", "משמרות", "משימות", "דיווח מכירות"]
     if user['role'] == 'admin':
         menu.append("ניהול עובדים (Admin)")
         menu.append("סוכן AI חכם")
         
-    choice = st.sidebar.selectbox("תפריט", menu)
+    choice = st.sidebar.selectbox("תפריט ניווט", menu)
 
     if choice == "לוח בקרה":
-        st.title("📊 ברוכים הבאים למערכת ניהול החנות")
+        st.title("📊 ברוכים הבאים למערכת ניהול החנות #TOYS")
         st.write("כאן תוכלו לראות סיכומים מהירים, משימות פתוחות ועדכונים יומיים.")
 
     elif choice == "משמרות":
@@ -139,7 +145,7 @@ else:
                 }).execute()
                 st.success("הדיווח נשמר בהצלחה!")
             except Exception as e:
-                st.error(fשגיאה בשמירת הדיווח: {e}")
+                st.error(f"שגיאה בשמירת הדיווח: {e}")
 
     elif choice == "ניהול עובדים (Admin)" and user['role'] == 'admin':
         st.title("👥 ניהול עובדים והרשאות")
@@ -167,7 +173,31 @@ else:
 
     elif choice == "סוכן AI חכם" and user['role'] == 'admin':
         st.title("🤖 סוכן ניהול חכם (AI)")
-        st.write("כאן תוכל לשאול שאלות על נתוני המכירות והשיבוצים ולקבל המלצות.")
-        prompt = st.text_input("מה תרצה לדעת?")
-        if prompt:
-            st.info("הסוכן מנתח את נתוני החנות...")
+        st.write("הסוכן האישי שלך לניתוח נתוני החנות, הפקת תובנות מכירות והמלצות לשיבוץ עובדים:")
+        
+        # שליפת נתונים מ-Supabase עבור הסוכן
+        try:
+            sales_res = supabase.table("sales").select("*").execute()
+            sales_data = sales_res.data
+            
+            shifts_res = supabase.table("shifts").select("*").execute()
+            shifts_data = shifts_res.data
+            
+            users_res = supabase.table("users").select("*").execute()
+            users_data = users_res.data
+        except Exception as e:
+            sales_data, shifts_data, users_data = [], [], []
+
+        # תצוגת סיכום מהיר למנהל
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            total_sales = sum(item['total_amount'] for item in sales_data) if sales_data else 0
+            st.metric("סך הכנסות מדווחות", f"₪{total_sales:,.2f}")
+        with col2:
+            st.metric("עובדים רשומים", len(users_data) if users_data else 0)
+        with col3:
+            st.metric("משמרות פעילות", len(shifts_data) if shifts_data else 0)
+
+        st.markdown("---")
+        
+        # אזור התשאול של הסוכן
