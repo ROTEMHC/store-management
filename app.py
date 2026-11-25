@@ -32,6 +32,17 @@ input, textarea { direction: rtl; text-align: right; }
 </style>
 """, unsafe_allow_html=True)
 
+# הפונקציה check_phone_status מחזירה רק שם ומזהה, בלי תפקיד.
+# אחרי התחברות מוצלחת שולפים את פרטי העובד המלאים (כולל role) מטבלת users.
+def load_user_profile(temp_user):
+    res = supabase.table("users").select("id, full_name, role").eq("id", temp_user["user_id"]).single().execute()
+    row = res.data or {}
+    return {
+        "user_id": temp_user["user_id"],
+        "full_name": row.get("full_name", temp_user.get("full_name", "")),
+        "role": row.get("role", "employee"),
+    }
+
 def show_logo(width=250):
     try:
         left, center, right = st.columns([1, 1, 1])
@@ -90,7 +101,7 @@ def login_screen():
                     }).eq("id", st.session_state.temp_user['user_id']).execute()
                     
                     st.success("הסיסמה הוגדרה בהצלחה! מתחבר...")
-                    st.session_state.user = st.session_state.temp_user
+                    st.session_state.user = load_user_profile(st.session_state.temp_user)
                     del st.session_state.step
                     st.rerun()
             except Exception as e:
@@ -106,7 +117,7 @@ def login_screen():
                     "password": pwd
                 })
                 if auth_res.user:
-                    st.session_state.user = st.session_state.temp_user
+                    st.session_state.user = load_user_profile(st.session_state.temp_user)
                     del st.session_state.step
                     st.rerun()
             except Exception as e:
