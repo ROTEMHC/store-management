@@ -27,6 +27,7 @@ def auth_email(user_id):
 st.markdown("""
 <style>
 .stApp, [data-testid="stSidebar"] { direction: rtl; text-align: right; }
+.stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label { text-align: right !important; }
 input, textarea { direction: rtl; text-align: right; }
 </style>
 """, unsafe_allow_html=True)
@@ -117,9 +118,9 @@ else:
     user = st.session_state.user
     
     try:
-        st.sidebar.image("logo.png", use_container_width=True)
-    except:
-        pass
+        st.sidebar.image("logo.png", width=200)
+    except Exception as e:
+        st.sidebar.caption(f"הלוגו לא נטען: {e}")
         
     st.sidebar.write(f"שלום, **{user['full_name']}**")
     st.sidebar.write(f"תפקיד: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
