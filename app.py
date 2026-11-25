@@ -3,8 +3,8 @@ from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
 
-# הגדרת עיצוב עמוד ואייקון בדפדפן
-st.set_page_config(page_title="#TOYS - ניהול חנות", page_icon="🧸", layout="wide")
+# הגדרת עיצוב עמוד
+st.set_page_config(page_title="ניהול חנות", page_icon="🛍️", layout="wide")
 
 # חיבור ל-Supabase מתוך ה-Secrets של Streamlit
 @st.cache_resource
@@ -20,9 +20,7 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 def login_screen():
-    # הצגת הלוגו גם במסך ההתחברות (אופציונלי, אפשר למרכז או להציג)
-    st.image("logo.png", width=250)
-    st.title("התחברות למערכת ניהול חנות")
+    st.title("🛍️ התחברות למערכת ניהול חנות")
     
     phone_input = st.text_input("הקלידי מספר טלפון:")
     
@@ -33,6 +31,7 @@ def login_screen():
             return
             
         try:
+            # קריאה לפונקציית ה-RPC לבדיקת הטלפון בבסיס הנתונים
             res = supabase.rpc("check_phone_status", {"phone_input": clean_phone}).execute()
             data = res.data
             
@@ -49,16 +48,19 @@ def login_screen():
         except Exception as e:
             st.error(f"שגיאה בהתחברות: {e}")
 
+    # שלב יצירת סיסמה ראשונית
     if "step" in st.session_state and st.session_state.step == "set_password":
         st.info(f"שלום {st.session_state.temp_user['full_name']}! זוהי כניסתך הראשונה. נא להגדיר סיסמה:")
         new_pwd = st.text_input("בחר סיסמה חדשה:", type="password")
         if st.button("הגדר סיסמה והתחבר"):
             try:
+                # יצירת משתמש ב-Supabase Auth
                 auth_res = supabase.auth.sign_up({
                     "email": f"{st.session_state.temp_user['user_id']}@store.local",
                     "password": new_pwd
                 })
                 if auth_res.user:
+                    # עדכון טבלת המשתמשים שהם רשומים
                     supabase.table("users").update({
                         "is_registered": True,
                         "auth_id": auth_res.user.id
@@ -71,6 +73,7 @@ def login_screen():
             except Exception as e:
                 st.error(f"שגיאה בהגדרת סיסמה: {e}")
 
+    # שלב הזנת סיסמה למשתמש רשום
     if "step" in st.session_state and st.session_state.step == "enter_password":
         st.info(f"שלום {st.session_state.temp_user['full_name']}! נא להקליד סיסמה:")
         pwd = st.text_input("סיסמה:", type="password", key="login_pwd")
@@ -87,26 +90,25 @@ def login_screen():
             except Exception as e:
                 st.error("סיסמה שגויה או שגיאה בהתחברות.")
 
+# אם המשתמש לא מחובר, הצג את מסך ההתחברות
 if not st.session_state.user:
     login_screen()
 else:
     user = st.session_state.user
-    
-    # --- הוספת הלוגו לראש סרגל הצד (Sidebar) ---
-    st.sidebar.image("logo.png", use_container_width=True)
-    st.sidebar.write(f"שלום, **{user['full_name']}**")
-    st.sidebar.write(f"תפקיד: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
+    st.sidebar.title(f"שלום, {user['full_name']}")
+    st.sidebar.write(f"הוראה: {'מנהל (Admin)' if user['role']=='admin' else 'עובד'}")
     
     if st.sidebar.button("התנתק"):
         st.session_state.user = None
         st.rerun()
 
+    # תפריט ניווט ראשי
     menu = ["לוח בקרה", "משמרות", "משימות", "דיווח מכירות"]
     if user['role'] == 'admin':
         menu.append("ניהול עובדים (Admin)")
         menu.append("סוכן AI חכם")
         
-    choice = st.sidebar.selectbox("תפריט ניווט", menu)
+    choice = st.sidebar.selectbox("תפריט", menu)
 
     if choice == "לוח בקרה":
         st.title("📊 ברוכים הבאים למערכת ניהול החנות")
@@ -137,7 +139,7 @@ else:
                 }).execute()
                 st.success("הדיווח נשמר בהצלחה!")
             except Exception as e:
-                st.error(f"שגיאה בשמירת הדיווח: {e}")
+                st.error(fשגיאה בשמירת הדיווח: {e}")
 
     elif choice == "ניהול עובדים (Admin)" and user['role'] == 'admin':
         st.title("👥 ניהול עובדים והרשאות")
