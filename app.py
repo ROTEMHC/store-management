@@ -138,6 +138,7 @@ def change_password_screen():
 # סוגי המשמרות. כרגע רק בוקר; להוספת משמרת ערב מוסיפים כאן שורה.
 SHIFT_TYPES = {
     "morning": {"label": "בוקר", "start": "10:00", "end": "16:00"},
+    "noon":    {"label": "צהריים", "start": "14:00", "end": "20:00"},  # שעות זמניות, לשנות כאן
 }
 HE_DAYS = ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת"]
 
@@ -223,22 +224,24 @@ def shifts_screen(user):
                 with st.form("availability", clear_on_submit=True):
                     chosen_days = st.pills("באילו ימים את/ה יכול/ה לעבוד?", future_days,
                                            selection_mode="multi", format_func=day_label)
-                    shift_type = st.segmented_control(
-                        "משמרת", list(SHIFT_TYPES.keys()), format_func=shift_type_label,
-                        default=list(SHIFT_TYPES.keys())[0], required=True,
+                    chosen_types = st.pills(
+                        "לאילו משמרות? (אפשר לבחור כמה)", list(SHIFT_TYPES.keys()),
+                        selection_mode="multi", format_func=shift_type_label,
+                        default=[list(SHIFT_TYPES.keys())[0]],
                     )
                     if st.form_submit_button("שליחה למנהלת", width="stretch", type="primary",
                                              icon=":material/send:"):
                         if not chosen_days:
                             st.warning("נא לבחור לפחות יום אחד.")
+                        elif not chosen_types:
+                            st.warning("נא לבחור לפחות משמרת אחת.")
                         else:
-                            t = SHIFT_TYPES[shift_type]
                             ok = all(
                                 call("submit_availability", {
-                                    "p_date": d.isoformat(), "p_type": shift_type,
-                                    "p_start": t["start"], "p_end": t["end"],
+                                    "p_date": d.isoformat(), "p_type": k,
+                                    "p_start": SHIFT_TYPES[k]["start"], "p_end": SHIFT_TYPES[k]["end"],
                                 }, error="שגיאה בשליחת הזמינות") is not FAILED
-                                for d in chosen_days
+                                for d in chosen_days for k in chosen_types
                             )
                             if ok:
                                 # הודעה כללית בלי פרטים אישיים (ראו הסבר ב-ntfy.sql)
