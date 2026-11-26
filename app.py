@@ -162,10 +162,7 @@ def assign_shift(user_id, d: date, shift_type: str):
         "p_start": t["start"],
         "p_end": t["end"],
     }, error="שגיאה בשיבוץ")
-    if result is not FAILED:
-        push_to_user(user_id, "שובצת למשמרת",
-                     f"משמרת {t['label']} ביום {day_label(d)}, {t['start']}–{t['end']}",
-                     tags=["calendar"])
+    # אין התראה כאן: השיבוץ נשמר כטיוטה, וההתראה נשלחת ב"שליחת שיבוצים לעובדים"
     return result
 
 def week_navigation():
@@ -195,24 +192,8 @@ def shifts_screen(user):
                 error="שגיאה בטעינת המשמרות") or []
 
     if is_admin:
-        # ---- מנהלת: שיבוץ ידני ----
-        with st.expander("שיבוץ עובד למשמרת", icon=":material/add:"):
-            employees = call("admin_list_users", error="שגיאה בטעינת העובדים") or []
-            if employees:
-                with st.form("assign_shift", clear_on_submit=True):
-                    emp_labels = {emp["full_name"]: emp["id"] for emp in employees}
-                    emp = st.selectbox("עובד", list(emp_labels.keys()))
-                    day = st.selectbox("יום", days, format_func=day_label)
-                    shift_type = st.segmented_control(
-                        "משמרת", list(SHIFT_TYPES.keys()), format_func=shift_type_label,
-                        default=list(SHIFT_TYPES.keys())[0], required=True,
-                    )
-                    if st.form_submit_button("שבץ", width="stretch", type="primary"):
-                        if assign_shift(emp_labels[emp], day, shift_type) is not FAILED:
-                            st.toast(f"{emp} שובץ/ה ל{day_label(day)}. העובד/ת יקבל/תקבל התראה.",
-                                     icon=":material/check:")
-                            st.rerun()
-        st.caption("עובדים שהגישו זמינות מסומנים בירוק. לחיצה על **שבץ** הופכת את הזמינות לשיבוץ ושולחת לעובד התראה.")
+        admin_schedule_board(start, days, rows)
+        return
     else:
         # ---- עובד: הגשת זמינות ----
         future_days = [d for d in days if d >= today_il()]
@@ -271,7 +252,7 @@ def shifts_screen(user):
                                 st.toast("הזמינות עודכנה ונשלחה למנהלת.", icon=":material/check:")
                                 st.rerun()
 
-    # ---- תצוגה שבועית: כרטיס לכל יום (מתאים לטלפון) ----
+    # ---- עובד: תצוגה שבועית, כרטיס לכל יום (מתאים לטלפון) ----
     for d in days:
         day_rows = [r for r in rows if r["shift_date"] == d.isoformat()]
         with st.container(border=True):
@@ -284,37 +265,136 @@ def shifts_screen(user):
             for r in day_rows:
                 label = SHIFT_TYPES.get(r["shift_type"], {}).get("label", r["shift_type"])
                 hours = f"{str(r['start_time'])[:5]}–{str(r['end_time'])[:5]}"
-                who = f"{r['full_name']} · " if is_admin else ""
-                is_new = not r.get("is_notified")
                 with st.container(horizontal=True, vertical_alignment="center"):
                     if r["status"] == "active":
                         badge = ":blue-badge[משובץ/ת]"
-                        if is_new and not is_admin:
+                        if not r.get("is_notified"):
                             badge += " :red-badge[חדש]"
-                        st.markdown(f"{badge} {who}{label} {hours}")
-                        if is_admin and st.button("בטל", key=f"cancel_{r['shift_id']}",
-                                                  icon=":material/close:", type="tertiary"):
-                            if call("admin_cancel_shift", {"p_shift_id": r["shift_id"]},
-                                    error="שגיאה בביטול") is not FAILED:
-                                push_to_user(r["user_id"], "משמרת בוטלה",
-                                             f"המשמרת שלך ביום {day_label(d)} בוטלה",
-                                             tags=["x"])
-                                st.rerun()
+                        st.markdown(f"{badge} {label} {hours}")
                     else:  # available
-                        badge = ":green-badge[זמין/ה]" if is_admin else ":orange-badge[הוגשה זמינות]"
-                        if is_new and is_admin:
-                            badge += " :red-badge[חדש]"
-                        st.markdown(f"{badge} {who}{label} {hours}")
-                        if is_admin:
-                            if st.button("שבץ", key=f"assign_{r['shift_id']}",
-                                         icon=":material/check:", type="primary"):
-                                if assign_shift(r["user_id"], d, r["shift_type"]) is not FAILED:
-                                    st.rerun()
-                        elif st.button("בטל זמינות", key=f"withdraw_{r['shift_id']}",
-                                       icon=":material/close:", type="tertiary"):
+                        st.markdown(f":orange-badge[הוגשה זמינות] {label} {hours}")
+                        if st.button("בטל זמינות", key=f"withdraw_{r['shift_id']}",
+                                     icon=":material/close:", type="tertiary"):
                             if call("withdraw_availability", {"p_shift_id": r["shift_id"]},
                                     error="שגיאה בביטול הזמינות") is not FAILED:
                                 st.rerun()
+
+
+# ------------------------------------------------------------
+# לוח שיבוץ למנהלת
+# שיבוץ = טיוטה (העובד עוד לא רואה). "שליחת שיבוצים" הופכת את כל הטיוטות
+# של השבוע לשיבוץ פעיל ושולחת לכל עובד התראה אחת מסכמת.
+# ------------------------------------------------------------
+def shift_sort_key(r):
+    return (r["shift_date"], list(SHIFT_TYPES).index(r["shift_type"]) if r["shift_type"] in SHIFT_TYPES else 99)
+
+def shift_text(r):
+    t = SHIFT_TYPES.get(r["shift_type"], {})
+    return f"{day_label(date.fromisoformat(r['shift_date']))} {t.get('label', r['shift_type'])} {t.get('start', '')}–{t.get('end', '')}"
+
+def admin_schedule_board(start, days, rows):
+    planned = [r for r in rows if r["status"] == "planned"]
+    pending = [r for r in rows if r["status"] == "available"]
+
+    # ---- שליחה לעובדים ----
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.metric("טיוטות שלא נשלחו", len(planned), border=True)
+        st.metric("זמינויות ממתינות", len(pending), border=True)
+    if st.button(f"שליחת שיבוצים לעובדים ({len(planned)})", type="primary",
+                 icon=":material/send:", disabled=not planned, width="stretch"):
+        sent = call("admin_publish_week", {"p_week_start": start.isoformat()},
+                    error="שגיאה בשליחת השיבוצים")
+        if sent is not FAILED:
+            by_user = {}
+            for s in sent or []:
+                by_user.setdefault(s["user_id"], []).append(s)
+            for uid, items in by_user.items():
+                lines = [shift_text(i) for i in sorted(items, key=shift_sort_key)]
+                push_to_user(uid, f"סידור העבודה שלך ({len(items)} משמרות)", "\n".join(lines),
+                             tags=["calendar"])
+            st.toast(f"השיבוצים נשלחו ל-{len(by_user)} עובדים.", icon=":material/check:")
+            st.rerun()
+    if planned:
+        st.caption("📝 טיוטה = שובץ אבל עוד לא נשלח. העובדים יראו את השיבוץ ויקבלו התראה רק אחרי השליחה.")
+
+    tab_board, tab_overview = st.tabs([":material/edit_calendar: שיבוץ", ":material/table_view: תמונה שבועית"])
+
+    # ---- תמונה שבועית: מי עובד בכל משמרת ----
+    with tab_overview:
+        table = []
+        for d in days:
+            row = {"יום": day_label(d)}
+            for k, t in SHIFT_TYPES.items():
+                cell = sorted([r for r in rows if r["shift_date"] == d.isoformat() and r["shift_type"] == k
+                               and r["status"] in ("planned", "active")], key=lambda r: r["full_name"])
+                row[f"{t['label']} {t['start']}–{t['end']}"] = ", ".join(
+                    ("✅ " if r["status"] == "active" else "📝 ") + r["full_name"] for r in cell) or "—"
+            table.append(row)
+        st.table(pd.DataFrame(table).set_index("יום"))
+        st.caption("✅ נשלח לעובד · 📝 טיוטה (עוד לא נשלח)")
+
+    # ---- לוח שיבוץ: יום = שורה, משמרת = עמודה ----
+    with tab_board:
+        employees = call("admin_list_users", error="שגיאה בטעינת העובדים") or []
+        for d in days:
+            day_rows = [r for r in rows if r["shift_date"] == d.isoformat()]
+            with st.container(border=True):
+                title = f"**{day_label(d)}**"
+                if d == today_il():
+                    title += "  :blue-badge[היום]"
+                st.markdown(title)
+                for col, (k, t) in zip(st.columns(len(SHIFT_TYPES)), SHIFT_TYPES.items()):
+                    with col:
+                        shift_cell(d, k, t, day_rows, employees)
+
+def shift_cell(d, k, t, day_rows, employees):
+    st.markdown(f"**{t['label']}** · {t['start']}–{t['end']}")
+    cell = [r for r in day_rows if r["shift_type"] == k]
+    assigned = [r for r in cell if r["status"] in ("planned", "active")]
+    available = [r for r in cell if r["status"] == "available"]
+
+    for r in assigned:
+        with st.container(horizontal=True, vertical_alignment="center"):
+            badge = ":green-badge[✅ נשלח]" if r["status"] == "active" else ":orange-badge[📝 טיוטה]"
+            st.markdown(f"{badge} {r['full_name']}")
+            if st.button("הסר", key=f"rm_{r['shift_id']}", icon=":material/close:", type="tertiary"):
+                if call("admin_cancel_shift", {"p_shift_id": r["shift_id"]},
+                        error="שגיאה בהסרה") is not FAILED:
+                    if r["status"] == "active":  # העובד כבר קיבל את השיבוץ - מודיעים לו
+                        push_to_user(r["user_id"], "משמרת בוטלה",
+                                     f"המשמרת שלך: {shift_text(r)} - בוטלה", tags=["x"])
+                    st.rerun()
+
+    for r in available:
+        # האם אותו עובד זמין / משובץ גם למשמרת אחרת באותו יום?
+        other = [o for o in day_rows if o["user_id"] == r["user_id"] and o["shift_type"] != k]
+        notes = []
+        for o in other:
+            label = SHIFT_TYPES.get(o["shift_type"], {}).get("label", o["shift_type"])
+            notes.append(f"משובץ/ת ל{label}" if o["status"] in ("planned", "active") else f"זמין/ה גם ל{label}")
+        new = " :red-badge[חדש]" if not r.get("is_notified") else ""
+        st.markdown(f":blue-badge[זמין/ה]{new} {r['full_name']}"
+                    + (f"  \n:gray[{' · '.join(notes)}]" if notes else ""))
+        with st.container(horizontal=True):
+            if st.button("שבץ", key=f"ok_{r['shift_id']}", icon=":material/check:", type="primary"):
+                if assign_shift(r["user_id"], d, k) is not FAILED:
+                    st.rerun()
+            if st.button("דחה", key=f"no_{r['shift_id']}", icon=":material/close:", type="tertiary"):
+                if call("admin_cancel_shift", {"p_shift_id": r["shift_id"]},
+                        error="שגיאה בדחייה") is not FAILED:
+                    st.rerun()
+
+    if not assigned and not available:
+        st.caption("אין עובדים")
+
+    taken = {r["user_id"] for r in assigned}
+    choices = {e["full_name"]: e["id"] for e in employees if e["id"] not in taken}
+    if choices:
+        with st.popover("שיבוץ ידני", icon=":material/person_add:"):
+            name = st.selectbox("עובד/ת", list(choices.keys()), key=f"pick_{d.isoformat()}_{k}")
+            if st.button("שבץ", key=f"add_{d.isoformat()}_{k}", type="primary", width="stretch"):
+                if assign_shift(choices[name], d, k) is not FAILED:
+                    st.rerun()
 
 
 # ============================================================
