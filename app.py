@@ -63,12 +63,28 @@ def push(topic, title, message, tags=None):
         st.toast(f"ההתראה לטלפון לא נשלחה: {e}", icon=":material/warning:")
         return False
 
-def push_to_user(user_id, title, message, tags=None):
-    topic = call("get_ntfy_topic", {"p_user_id": user_id}, error="שגיאה באיתור ערוץ ההתראות")
+# סוגי התראות - כל משתמש יכול לכבות כל סוג (נשמר ב-users.notify_prefs)
+NOTIFY_KINDS = {
+    "shifts": "סידור עבודה ושינויים במשמרות",
+    "tasks": "משימה חדשה",
+    "availability": "עובד/ת הגיש/ה זמינות",
+    "task_done": "עובד/ת סימן/ה משימה כבוצעה",
+    "reminders": "התראות קבועות (תזכורות)",
+}
+KINDS_BY_ROLE = {
+    "employee": ["shifts", "tasks", "reminders"],
+    "admin": ["availability", "task_done", "shifts", "reminders"],
+}
+
+def push_to_user(user_id, title, message, tags=None, kind=None):
+    """ה-DB מחזיר ערוץ רק אם המשתמש לא כיבה את סוג ההתראה הזה."""
+    topic = call("get_ntfy_topic", {"p_user_id": user_id, "p_kind": kind},
+                 error="שגיאה באיתור ערוץ ההתראות")
     return push(topic, title, message, tags)
 
-def push_to_admins(title, message, tags=None):
-    for topic in call("get_admin_ntfy_topics", error="שגיאה באיתור ערוצי המנהלות") or []:
+def push_to_admins(title, message, tags=None, kind=None):
+    for topic in call("get_admin_ntfy_topics", {"p_kind": kind},
+                      error="שגיאה באיתור ערוצי המנהלות") or []:
         push(topic, title, message, tags)
 
 # כתובת המייל הפנימית של כל עובד ב-Supabase Auth.
@@ -85,6 +101,16 @@ st.markdown("""
 .stApp, [data-testid="stSidebar"] { direction: rtl; text-align: right; }
 .stApp h1, .stApp h2, .stApp h3, .stApp p, .stApp label { text-align: right !important; }
 input, textarea { direction: rtl; text-align: right; }
+/* רשימות ממוספרות / תבליטים */
+.stApp ol, .stApp ul { direction: rtl; text-align: right; padding-right: 1.5em; padding-left: 0; }
+.stApp li { text-align: right !important; }
+/* טבלאות (st.table): יישור לימין + קו בין עמודות */
+[data-testid="stTable"] table { direction: rtl; }
+[data-testid="stTable"] th, [data-testid="stTable"] td {
+  text-align: right !important;
+  border-inline-start: 1px solid #F5C9DD;
+}
+[data-testid="stTable"] th { font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -248,7 +274,7 @@ def shifts_screen(user):
                                     # הודעה כללית בלי פרטים אישיים (ראו הסבר ב-ntfy.sql)
                                     push_to_admins("הגשת זמינות חדשה",
                                                    "עובד/ת הגיש/ה זמינות למשמרות. היכנסי לאפליקציה לשיבוץ.",
-                                                   tags=["bell"])
+                                                   tags=["bell"], kind="availability")
                                 st.toast("הזמינות עודכנה ונשלחה למנהלת.", icon=":material/check:")
                                 st.rerun()
 
@@ -311,7 +337,7 @@ def admin_schedule_board(start, days, rows):
             for uid, items in by_user.items():
                 lines = [shift_text(i) for i in sorted(items, key=shift_sort_key)]
                 push_to_user(uid, f"סידור העבודה שלך ({len(items)} משמרות)", "\n".join(lines),
-                             tags=["calendar"])
+                             tags=["calendar"], kind="shifts")
             st.toast(f"השיבוצים נשלחו ל-{len(by_user)} עובדים.", icon=":material/check:")
             st.rerun()
     if planned:
@@ -407,7 +433,7 @@ def shift_cell(d, k, t, day_rows, employees):
                         error="שגיאה בהסרה") is not FAILED:
                     if r["status"] == "active":  # העובד כבר קיבל את השיבוץ - מודיעים לו
                         push_to_user(r["user_id"], "משמרת בוטלה",
-                                     f"המשמרת שלך: {shift_text(r)} - בוטלה", tags=["x"])
+                                     f"המשמרת שלך: {shift_text(r)} - בוטלה", tags=["x"], kind="shifts")
                     st.rerun()
 
     for r in available:
@@ -488,7 +514,7 @@ def tasks_screen(user):
                             recipients = targets or [emp["id"] for emp in employees]
                             msg = title.strip() + (f" (עד {format_due(due)})" if due else "")
                             for uid in recipients:
-                                push_to_user(uid, "משימה חדשה", msg, tags=["memo"])
+                                push_to_user(uid, "משימה חדשה", msg, tags=["memo"], kind="tasks")
                             st.toast(f"המשימה נוצרה ל-{len(recipients)} עובדים.", icon=":material/check:")
                             st.rerun()
 
@@ -522,7 +548,7 @@ def tasks_screen(user):
                                 error="שגיאה בעדכון") is not FAILED:
                             if not is_admin:
                                 # הודעה למנהלת. בלי שם העובד - ראו הסבר ב-ntfy.sql
-                                push_to_admins("משימה הושלמה", f"✓ {t['title']}", tags=["white_check_mark"])
+                                push_to_admins("משימה הושלמה", f"✓ {t['title']}", tags=["white_check_mark"], kind="task_done")
                             st.toast("כל הכבוד! המשימה סומנה כבוצעה.", icon=":material/check:")
                             st.rerun()
                 else:
@@ -703,6 +729,12 @@ def sales_admin_screen():
 # ============================================================
 # מסך "התראות": הגדרות + חיבור הטלפון
 # ============================================================
+def _save_notify_prefs(kinds):
+    """נקרא כשמשנים מתג של סוג התראה - שומר את כל הסוגים יחד."""
+    prefs = {k: bool(st.session_state.get(f"pref_{k}", True)) for k in kinds}
+    if call("set_my_notification_prefs", {"p_prefs": prefs}, error="שגיאה בשמירת ההגדרות") is not FAILED:
+        st.toast("ההגדרות נשמרו.", icon=":material/check:")
+
 def phone_notifications_screen(user):
     st.title("התראות")
     settings = call("get_my_notification_settings", error="שגיאה בטעינת ההגדרות")
@@ -721,6 +753,16 @@ def phone_notifications_screen(user):
             if call("set_my_notification_settings", {"p_push": push_on, "p_in_app": in_app_on},
                     error="שגיאה בשמירת ההגדרות") is not FAILED:
                 st.toast("ההגדרות נשמרו.", icon=":material/check:")
+
+    # סוגי התראות - כל סוג אפשר לכבות בנפרד (חל על הטלפון ועל האפליקציה)
+    if push_on or in_app_on:
+        prefs = settings.get("prefs") or {}
+        kinds = KINDS_BY_ROLE["admin" if user["role"] == "admin" else "employee"]
+        with st.container(border=True):
+            st.markdown("**על מה לקבל התראות?**")
+            for k in kinds:
+                st.toggle(NOTIFY_KINDS[k], value=bool(prefs.get(k, True)), key=f"pref_{k}",
+                          on_change=_save_notify_prefs, args=(kinds,))
 
     if not push_on:
         st.caption("התראות לטלפון כבויות. אפשר להפעיל אותן מחדש בכל רגע.")
