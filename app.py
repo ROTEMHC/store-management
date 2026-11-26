@@ -221,34 +221,54 @@ def shifts_screen(user):
             if not future_days:
                 st.caption("השבוע הזה כבר עבר. עברו לשבוע הבא כדי להגיש זמינות.")
             else:
-                with st.form("availability", clear_on_submit=True):
-                    chosen_days = st.pills("באילו ימים את/ה יכול/ה לעבוד?", future_days,
-                                           selection_mode="multi", format_func=day_label)
-                    chosen_types = st.pills(
-                        "לאילו משמרות? (אפשר לבחור כמה)", list(SHIFT_TYPES.keys()),
-                        selection_mode="multi", format_func=shift_type_label,
-                        default=[list(SHIFT_TYPES.keys())[0]],
-                    )
+                st.caption("לכל יום בוחרים באילו משמרות את/ה יכול/ה לעבוד. יום בלי בחירה = לא זמין/ה.")
+                with st.form(f"availability_{start.isoformat()}"):
+                    # מצב נוכחי מה-DB: מה כבר הוגש ומה כבר שובץ, לכל יום
+                    selections = {}
+                    submitted = {}
+                    for d in future_days:
+                        mine = [r for r in rows if r["shift_date"] == d.isoformat()]
+                        assigned = [r["shift_type"] for r in mine if r["status"] == "active"]
+                        submitted[d] = {r["shift_type"]: r["shift_id"] for r in mine
+                                        if r["status"] == "available"}
+                        options = [k for k in SHIFT_TYPES if k not in assigned]
+                        selections[d] = st.pills(
+                            day_label(d), options, selection_mode="multi",
+                            format_func=shift_type_label,
+                            default=[k for k in submitted[d] if k in options],
+                            key=f"av_{d.isoformat()}",
+                        ) if options else []
+                        if assigned:
+                            names = ", ".join(SHIFT_TYPES.get(k, {}).get("label", k) for k in assigned)
+                            st.caption(f":blue-badge[משובץ/ת: {names}]")
+
                     if st.form_submit_button("שליחה למנהלת", width="stretch", type="primary",
                                              icon=":material/send:"):
-                        if not chosen_days:
-                            st.warning("נא לבחור לפחות יום אחד.")
-                        elif not chosen_types:
-                            st.warning("נא לבחור לפחות משמרת אחת.")
+                        to_add = [(d, k) for d in future_days for k in selections[d]
+                                  if k not in submitted[d]]
+                        to_remove = [submitted[d][k] for d in future_days for k in submitted[d]
+                                     if k not in selections[d]]
+                        if not to_add and not to_remove:
+                            st.info("לא היה שינוי בזמינות.")
                         else:
-                            ok = all(
+                            ok = all([
                                 call("submit_availability", {
                                     "p_date": d.isoformat(), "p_type": k,
                                     "p_start": SHIFT_TYPES[k]["start"], "p_end": SHIFT_TYPES[k]["end"],
                                 }, error="שגיאה בשליחת הזמינות") is not FAILED
-                                for d in chosen_days for k in chosen_types
-                            )
+                                for d, k in to_add
+                            ] + [
+                                call("withdraw_availability", {"p_shift_id": sid},
+                                     error="שגיאה בביטול הזמינות") is not FAILED
+                                for sid in to_remove
+                            ])
                             if ok:
-                                # הודעה כללית בלי פרטים אישיים (ראו הסבר ב-ntfy.sql)
-                                push_to_admins("הגשת זמינות חדשה",
-                                               "עובד/ת הגיש/ה זמינות למשמרות. היכנסי לאפליקציה לשיבוץ.",
-                                               tags=["bell"])
-                                st.toast("הזמינות נשלחה למנהלת.", icon=":material/check:")
+                                if to_add:
+                                    # הודעה כללית בלי פרטים אישיים (ראו הסבר ב-ntfy.sql)
+                                    push_to_admins("הגשת זמינות חדשה",
+                                                   "עובד/ת הגיש/ה זמינות למשמרות. היכנסי לאפליקציה לשיבוץ.",
+                                                   tags=["bell"])
+                                st.toast("הזמינות עודכנה ונשלחה למנהלת.", icon=":material/check:")
                                 st.rerun()
 
     # ---- תצוגה שבועית: כרטיס לכל יום (מתאים לטלפון) ----
