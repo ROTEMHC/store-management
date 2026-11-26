@@ -959,6 +959,136 @@ def notifications_banner(user):
             call("mark_notifications_seen", error="שגיאה בעדכון ההתראות")
             st.rerun()
 
+# ============================================================
+# התראות קבועות (במסך "ניהול עובדים")
+# הכללים נשמרים בטבלה notification_rules, ו-pg_cron ב-Supabase
+# שולח אותם כל 5 דקות - גם כשאף אחד לא מחובר לאפליקציה.
+# ============================================================
+TRIGGERS = {
+    "shift_end": "בסוף משמרת",
+    "shift_start": "בתחילת משמרת",
+    "daily": "כל יום",
+    "weekly": "כל שבוע",
+}
+TARGETS = {
+    "shift_workers": "מי שמשובץ/ת למשמרת",
+    "all_employees": "כל העובדים",
+    "admins": "המנהלות",
+}
+SALES_REMINDER = {
+    "p_title": "עדכון מכירות",
+    "p_message": "היי {שם}, משמרת ה{משמרת} הסתיימה. אל תשכח/י לעדכן את המכירות באפליקציה 💰",
+    "p_trigger_type": "shift_end", "p_offset_minutes": 0, "p_shift_type": None,
+    "p_send_time": None, "p_weekday": None, "p_target": "shift_workers",
+}
+
+def describe_rule(r):
+    """תיאור הכלל בעברית, למשל: 'בסוף משמרת בוקר, 10 דק' אחרי · ל: מי שמשובץ/ת למשמרת'."""
+    t = r["trigger_type"]
+    if t in ("shift_start", "shift_end"):
+        when = TRIGGERS[t]
+        if r.get("shift_type"):
+            when += " " + SHIFT_TYPES.get(r["shift_type"], {}).get("label", r["shift_type"])
+        off = r.get("offset_minutes") or 0
+        if off:
+            when += f", {abs(off)} דק' {'אחרי' if off > 0 else 'לפני'}"
+    elif t == "daily":
+        when = f"כל יום ב-{r.get('send_time')}"
+    else:
+        when = f"כל יום {HE_DAYS[r.get('weekday') or 0]} ב-{r.get('send_time')}"
+    return f"{when} · ל: {TARGETS.get(r['target'], r['target'])}"
+
+def preview_text(text, user, shift_type=None):
+    shift_label = SHIFT_TYPES.get(shift_type or "morning", {}).get("label", "בוקר")
+    return (text.replace("{שם}", user["full_name"]).replace("{משמרת}", shift_label)
+                .replace("{תאריך}", today_il().strftime("%d/%m")))
+
+def _toggle_rule(rule_id, key):
+    """נקרא כשמשנים את המתג 'פעילה' של כלל."""
+    call("admin_set_rule_active", {"p_rule_id": rule_id, "p_active": st.session_state[key]},
+         error="שגיאה בעדכון")
+
+def recurring_rules_section(user):
+    st.subheader("התראות קבועות")
+    st.caption("תזכורות שנשלחות לבד לטלפון (ntfy), גם כשאף אחד לא מחובר. "
+               "בטקסט אפשר לכתוב {שם}, {משמרת}, {תאריך} - והם יוחלפו אוטומטית.")
+
+    rules = call("admin_list_rules", error="שגיאה בטעינת ההתראות הקבועות")
+    if rules is FAILED:
+        st.info("כדי להשתמש בהתראות קבועות צריך להריץ ב-Supabase את notification_rules.sql.")
+        return
+    rules = rules or []
+
+    if not any(r["trigger_type"] == "shift_end" and r["target"] == "shift_workers" for r in rules):
+        if st.button("הוספה מהירה: תזכורת עדכון מכירות בסוף כל משמרת",
+                     icon=":material/bolt:", type="primary"):
+            if call("admin_create_rule", SALES_REMINDER, error="שגיאה ביצירת ההתראה") is not FAILED:
+                st.toast("התזכורת נוספה.", icon=":material/check:")
+                st.rerun()
+
+    if not rules:
+        st.caption("אין עדיין התראות קבועות.")
+    for r in rules:
+        with st.container(border=True):
+            st.markdown(f"**{r['title']}**  \n:gray[{describe_rule(r)}]")
+            st.caption(r["message"])
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.toggle("פעילה", value=bool(r["is_active"]), key=f"rule_on_{r['id']}",
+                          on_change=_toggle_rule, args=(r["id"], f"rule_on_{r['id']}"))
+                if st.button("שלח לי בדיקה", key=f"rule_test_{r['id']}", icon=":material/send:"):
+                    s = call("get_my_notification_settings", error="שגיאה") or {}
+                    if s.get("notify_push") and s.get("topic"):
+                        st_label = r.get("shift_type")
+                        if push(s["topic"], preview_text(r["title"], user, st_label),
+                                preview_text(r["message"], user, st_label), tags=["alarm_clock"]):
+                            st.toast("נשלחה בדיקה לטלפון שלך.", icon=":material/check:")
+                    else:
+                        st.warning("ההתראות לטלפון שלך כבויות או לא מחוברות (מסך התראות).")
+                if st.button("מחיקה", key=f"rule_del_{r['id']}", icon=":material/delete:", type="tertiary"):
+                    if call("admin_delete_rule", {"p_rule_id": r["id"]}, error="שגיאה במחיקה") is not FAILED:
+                        st.rerun()
+
+    with st.expander("התראה קבועה חדשה", icon=":material/add_alert:"):
+        title = st.text_input("כותרת", key="nr_title")
+        message = st.text_area("טקסט ההתראה", key="nr_msg",
+                               placeholder="למשל: היי {שם}, אל תשכח/י לעדכן מכירות")
+        trigger = st.segmented_control("מתי", list(TRIGGERS), format_func=TRIGGERS.get,
+                                       default="shift_end", required=True, key="nr_trigger")
+        shift_type, offset, send_time, weekday = None, 0, None, None
+        if trigger in ("shift_start", "shift_end"):
+            shift_opts = {"": "כל המשמרות", **{k: v["label"] for k, v in SHIFT_TYPES.items()}}
+            shift_type = st.segmented_control("איזו משמרת", list(shift_opts), format_func=shift_opts.get,
+                                              default="", required=True, key="nr_shift") or None
+            with st.container(horizontal=True, vertical_alignment="bottom"):
+                minutes = st.number_input("דקות", min_value=0, max_value=600, step=5, value=0, key="nr_min")
+                direction = st.segmented_control("כיוון", ["אחרי", "לפני"], default="אחרי", required=True,
+                                                 key="nr_dir", label_visibility="collapsed")
+            offset = int(minutes) * (1 if direction == "אחרי" else -1)
+            target_opts = ["shift_workers", "admins"]
+        else:
+            send_time = st.time_input("שעה", value=time(9, 0), key="nr_time")
+            if trigger == "weekly":
+                weekday = st.segmented_control("יום", list(range(7)), format_func=lambda i: HE_DAYS[i],
+                                               default=0, required=True, key="nr_day")
+            target_opts = list(TARGETS)
+        target = st.segmented_control("למי", target_opts, format_func=TARGETS.get,
+                                      default=target_opts[0], required=True, key="nr_target")
+
+        if st.button("שמירת ההתראה", type="primary", icon=":material/save:", width="stretch"):
+            if not title.strip() or not message.strip():
+                st.warning("חובה למלא כותרת וטקסט.")
+            elif call("admin_create_rule", {
+                "p_title": title, "p_message": message, "p_trigger_type": trigger,
+                "p_offset_minutes": offset, "p_shift_type": shift_type,
+                "p_send_time": send_time.strftime("%H:%M") if send_time else None,
+                "p_weekday": weekday, "p_target": target,
+            }, error="שגיאה ביצירת ההתראה") is not FAILED:
+                for k in ("nr_title", "nr_msg"):
+                    st.session_state.pop(k, None)
+                st.toast("ההתראה הקבועה נשמרה.", icon=":material/check:")
+                st.rerun()
+
+
 def dashboard_screen(user):
     is_admin = user["role"] == "admin"
     st.title(f"שלום {user['full_name']} 👋")
@@ -1190,6 +1320,9 @@ else:
                         "temp_password": temp_pwd
                     }, error="שגיאה באיפוס הסיסמה") is not FAILED:
                         st.success(f"הסיסמה של {chosen} אופסה. מסרי לעובד את הסיסמה הזמנית.")
+
+        st.markdown("---")
+        recurring_rules_section(user)
 
     elif choice == "סוכן AI חכם":
         agent_screen(user)
