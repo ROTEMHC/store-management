@@ -317,35 +317,80 @@ def admin_schedule_board(start, days, rows):
     if planned:
         st.caption("📝 טיוטה = שובץ אבל עוד לא נשלח. העובדים יראו את השיבוץ ויקבלו התראה רק אחרי השליחה.")
 
-    tab_board, tab_overview = st.tabs([":material/edit_calendar: שיבוץ", ":material/table_view: תמונה שבועית"])
+    st.caption("הסידור הסופי (מה שכבר נשלח לעובדים) מופיע בלשונית **סידור שבועי**.")
 
-    # ---- תמונה שבועית: מי עובד בכל משמרת ----
-    with tab_overview:
+    # ---- לוח שיבוץ: יום = שורה, משמרת = עמודה ----
+    employees = call("admin_list_users", error="שגיאה בטעינת העובדים") or []
+    for d in days:
+        day_rows = [r for r in rows if r["shift_date"] == d.isoformat()]
+        with st.container(border=True):
+            title = f"**{day_label(d)}**"
+            if d == today_il():
+                title += "  :blue-badge[היום]"
+            st.markdown(title)
+            for col, (k, t) in zip(st.columns(len(SHIFT_TYPES)), SHIFT_TYPES.items()):
+                with col:
+                    shift_cell(d, k, t, day_rows, employees)
+
+
+# ------------------------------------------------------------
+# סידור שבועי סופי - למנהלת
+# מציג רק שיבוצים שנשלחו לעובדים (status = active).
+# ------------------------------------------------------------
+def weekly_schedule_screen():
+    st.title("סידור עבודה שבועי")
+    start, days = week_navigation()
+    st.subheader(f"{days[0]:%d/%m} – {days[6]:%d/%m/%Y}")
+
+    rows = call("get_week_shifts", {"week_start": start.isoformat()},
+                error="שגיאה בטעינת המשמרות") or []
+    final = [r for r in rows if r["status"] == "active"]
+    drafts = [r for r in rows if r["status"] == "planned"]
+
+    if drafts:
+        st.warning(f"{len(drafts)} שיבוצים בטיוטה עוד לא נשלחו לעובדים ולכן לא מופיעים כאן. "
+                   "כדי לשלוח: מסך **משמרות** ← **שליחת שיבוצים לעובדים**.", icon=":material/info:")
+    if not final:
+        st.caption("אין עדיין שיבוצים שנשלחו לשבוע הזה.")
+        return
+
+    with st.container(horizontal=True):
+        st.metric("משמרות בשבוע", len(final), border=True)
+        st.metric("עובדים משובצים", len({r["user_id"] for r in final}), border=True)
+
+    view = st.segmented_control("תצוגה", ["לפי משמרות", "לפי עובדים"], default="לפי משמרות",
+                                required=True, label_visibility="collapsed", key="sched_view")
+
+    if view == "לפי משמרות":
         table = []
         for d in days:
             row = {"יום": day_label(d)}
             for k, t in SHIFT_TYPES.items():
-                cell = sorted([r for r in rows if r["shift_date"] == d.isoformat() and r["shift_type"] == k
-                               and r["status"] in ("planned", "active")], key=lambda r: r["full_name"])
-                row[f"{t['label']} {t['start']}–{t['end']}"] = ", ".join(
-                    ("✅ " if r["status"] == "active" else "📝 ") + r["full_name"] for r in cell) or "—"
+                names = sorted(r["full_name"] for r in final
+                               if r["shift_date"] == d.isoformat() and r["shift_type"] == k)
+                row[f"{t['label']} {t['start']}–{t['end']}"] = ", ".join(names) or "—"
             table.append(row)
-        st.table(pd.DataFrame(table).set_index("יום"))
-        st.caption("✅ נשלח לעובד · 📝 טיוטה (עוד לא נשלח)")
+        df = pd.DataFrame(table).set_index("יום")
+    else:
+        names = sorted({r["full_name"] for r in final})
+        table = []
+        for name in names:
+            mine = [r for r in final if r["full_name"] == name]
+            row = {"עובד/ת": name}
+            for d in days:
+                labels = [SHIFT_TYPES.get(r["shift_type"], {}).get("label", r["shift_type"])
+                          for r in sorted(mine, key=shift_sort_key) if r["shift_date"] == d.isoformat()]
+                row[day_label(d)] = " + ".join(labels) or "—"
+            row["סה\"כ"] = len(mine)
+            table.append(row)
+        df = pd.DataFrame(table).set_index("עובד/ת")
 
-    # ---- לוח שיבוץ: יום = שורה, משמרת = עמודה ----
-    with tab_board:
-        employees = call("admin_list_users", error="שגיאה בטעינת העובדים") or []
-        for d in days:
-            day_rows = [r for r in rows if r["shift_date"] == d.isoformat()]
-            with st.container(border=True):
-                title = f"**{day_label(d)}**"
-                if d == today_il():
-                    title += "  :blue-badge[היום]"
-                st.markdown(title)
-                for col, (k, t) in zip(st.columns(len(SHIFT_TYPES)), SHIFT_TYPES.items()):
-                    with col:
-                        shift_cell(d, k, t, day_rows, employees)
+    st.table(df)
+    st.download_button(
+        "הורדה לאקסל (CSV)", df.to_csv().encode("utf-8-sig"),
+        file_name=f"schedule_{start.isoformat()}.csv", mime="text/csv",
+        icon=":material/download:",
+    )
 
 def shift_cell(d, k, t, day_rows, employees):
     st.markdown(f"**{t['label']}** · {t['start']}–{t['end']}")
@@ -541,23 +586,36 @@ def sales_leaderboard(me_name=None, key="lb"):
 def sales_report_screen(user):
     """עובד: דיווח מכירות יומי + טבלת הצוות."""
     st.title("דיווח מכירות יומי")
+    today = today_il()
+    now = datetime.now(IL)
     with st.form("sales_report", clear_on_submit=True):
-        sales_amount = st.number_input("סך מכירות במשמרת (₪)", min_value=0.0, step=10.0)
-        trans_count = st.number_input("מספר עסקאות / לקוחות", min_value=0, step=1)
+        # יום ושעה של הדיווח (ברירת מחדל: עכשיו). עד 30 יום אחורה, לא בעתיד.
+        with st.container(horizontal=True):
+            sale_date = st.date_input("תאריך", value=today, min_value=today - timedelta(days=30),
+                                      max_value=today, format="DD/MM/YYYY")
+            sale_time = st.time_input("שעה", value=time(now.hour, now.minute), step=timedelta(minutes=5))
+        # שדות ריקים (בלי 0.00 מוכן מראש) - מקלידים ישר, אפשר גם אגורות
+        sales_amount = st.number_input("סך מכירות במשמרת (₪)", min_value=0.0, value=None,
+                                       step=0.01, format="%.2f", placeholder="למשל 1250.50")
+        trans_count = st.number_input("מספר עסקאות / לקוחות", min_value=0, value=None, step=1,
+                                      placeholder="למשל 14")
         notes = st.text_area("הערות נוספות")
         if st.form_submit_button("שמירת דיווח", width="stretch", type="primary",
                                  icon=":material/save:"):
-            if call("submit_sales_report", {
-                "p_amount": sales_amount,
-                "p_count": int(trans_count),
+            if sales_amount is None:
+                st.warning("נא להזין את סך המכירות.")
+            elif call("submit_sales_report", {
+                "p_amount": round(float(sales_amount), 2),
+                "p_count": int(trans_count or 0),
                 "p_notes": notes,
+                "p_date": sale_date.isoformat(),
+                "p_time": sale_time.strftime("%H:%M"),
             }, error="שגיאה בשמירת הדיווח") is not FAILED:
                 st.toast("הדיווח נשמר בהצלחה!", icon=":material/check:")
                 st.rerun()
 
     sales_leaderboard(me_name=user["full_name"], key="lb_emp")
 
-    today = today_il()
     mine = call("get_my_sales", {"p_from": (today - timedelta(days=30)).isoformat(),
                                  "p_to": today.isoformat()},
                 error="שגיאה בטעינת הדיווחים") or []
@@ -568,6 +626,7 @@ def sales_report_screen(user):
             hide_index=True,
             column_config={
                 "sale_date": st.column_config.DateColumn("תאריך", format="DD/MM/YYYY"),
+                "sale_time": st.column_config.TextColumn("שעה"),
                 "total_amount": st.column_config.NumberColumn("סכום", format="₪%.2f"),
                 "transactions_count": st.column_config.NumberColumn("עסקאות"),
                 "notes": st.column_config.TextColumn("הערות"),
@@ -608,11 +667,12 @@ def sales_admin_screen():
     edited = st.data_editor(
         df,
         hide_index=True,
-        disabled=["full_name", "sale_date"],
-        column_order=["full_name", "sale_date", "total_amount", "transactions_count", "notes"],
+        disabled=["full_name", "sale_date", "sale_time"],
+        column_order=["full_name", "sale_date", "sale_time", "total_amount", "transactions_count", "notes"],
         column_config={
             "full_name": st.column_config.TextColumn("עובד"),
             "sale_date": st.column_config.DateColumn("תאריך", format="DD/MM/YYYY"),
+            "sale_time": st.column_config.TextColumn("שעה"),
             "total_amount": st.column_config.NumberColumn("סכום", format="₪%.2f", min_value=0),
             "transactions_count": st.column_config.NumberColumn("עסקאות", min_value=0, step=1),
             "notes": st.column_config.TextColumn("הערות"),
@@ -748,6 +808,10 @@ def detect_topic(q: str):
     if has_any(q, ["להוריד", "הורד", "מוריד", "להתקין", "התקנ", "מתקינ", "מסך הבית", "קישור",
                    "url", "לינק", "אייקון", "אפליקציה"]):
         return "install"
+    if has_any(q, ["אני זמינה", "אני זמין", "זמינה בכל", "זמין בכל", "זמינה תמיד", "זמין תמיד"]):
+        return "admin_available"
+    if has_any(q, ["תמליץ", "המלצ", "הצע", "תבנה", "בנה", "תסדר", "סדר לי", "סידור"]):
+        return "schedule"
     if has_any(q, ["עובדים", "צוות"]):
         return "staff"
     if has_any(q, ["משמרת", "משמרות", "שיבוץ", "שיבוצים", "משובץ", "לעבוד", "עובד/ת מתי"]):
@@ -850,10 +914,29 @@ def agent_answer(q: str, user, dash):
 
     # עובד: רק שאלות על עצמו
     if not is_admin:
-        if topic == "shifts":
+        if topic in ("shifts", "schedule"):
             return my_shifts_answer(q)
         if topic == "sales":
             return my_sales_answer(q)
+        if topic == "admin_available":
+            return {"role": "assistant",
+                    "content": "כדי לעדכן מתי את/ה זמין/ה - היכנס/י למסך **משמרות** ← **הגשת זמינות**."}
+
+    # מנהלת: "אני זמינה בכל יום" -> הסוכן ישלים איתה משמרות חסרות
+    if topic == "admin_available":
+        return {"role": "assistant",
+                "content": "רשמתי 👍 בהמלצות לסידור אשלים איתך משמרות שאין להן מספיק עובדים. "
+                           "רוצה שאמליץ עכשיו על סידור לשבוע הבא?"}
+
+    # מנהלת: המלצה על סידור לפי הזמינות שהעובדים הגישו
+    if topic in ("schedule", "shifts"):
+        this_week = "השבוע" in q and not has_any(q, ["הבא", "הקרוב"])
+        start = week_start_for(today_il()) + timedelta(weeks=0 if this_week else 1)
+        return {"role": "assistant",
+                "content": f"📅 **הצעה לסידור {start:%d/%m}–{start + timedelta(days=6):%d/%m}**, "
+                           "לפי הזמינות שהעובדים שלחו. אפשר לשנות כמה עובדים צריך בכל משמרת, "
+                           "ואז לאשר - ההצעה תישמר כ**טיוטה** ותוכלי לשנות אותה לפני השליחה לעובדים.",
+                "proposal": start.isoformat()}
 
     if topic == "sales" and is_admin:
         sales = dash.get("sales") or []
@@ -864,7 +947,7 @@ def agent_answer(q: str, user, dash):
                 "content": f"📊 סך כל המכירות במערכת: **₪{total:,.2f}** לאורך {len(sales)} דיווחים.",
                 "table": sales}
 
-    if topic in ("staff", "shifts") and is_admin:
+    if topic == "staff" and is_admin:
         users = dash.get("users") or []
         return {"role": "assistant",
                 "content": "👥 מצבת העובדים. 💡 המלצה: לוודא לפחות 2 עובדים בכל משמרת בסופי שבוע, ולשבץ לפחות 48 שעות מראש.",
@@ -878,11 +961,126 @@ def agent_answer(q: str, user, dash):
     examples = ("- **המשמרות שלי** (למשל: \"מה השיבוצים שלי החודש?\", \"מתי אני עובד/ת בשבוע הבא?\")\n"
                 "- **המכירות שלי** (למשל: \"כמה מכרתי השבוע?\", \"כמה מכרתי ב-12/11?\", \"כמה מכרתי מ-1/11 עד 15/11?\")\n"
                 if not is_admin else
+                "- **המלצה על סידור משמרות** (למשל: \"תמליץ לי על סידור לשבוע הקרוב\")\n"
                 "- **נתוני מכירות** ו**מצבת עובדים**\n")
     return {"role": "assistant",
             "content": "אני יכול לעזור עם:\n" + examples +
                        "- **התקנת התראות לטלפון** (למשל: \"איך מתקינים התראות?\")\n"
                        "- **הוספת האפליקציה למסך הבית** (למשל: \"איך מורידים את האפליקציה?\")"}
+
+# ------------------------------------------------------------
+# המלצת סידור משמרות (למנהלת)
+# כללים, לפי הסדר:
+#   1. משבצים רק מי שהגיש זמינות לאותה משמרת.
+#   2. הוגנות: קודם מי שיש לו הכי מעט משמרות השבוע.
+#   3. מי שזמין רק למשמרת אחת באותו יום מקבל עדיפות על מי שזמין לשתיהן
+#      (כך הגמישים פנויים להשלים משמרת אחרת).
+#   4. עד משמרת אחת לעובד ביום; משמרת כפולה רק אם אין ברירה.
+#   5. משמרת שעדיין חסרה - משלימים עם המנהלת (אם בחרה בזה), אחרת מסמנים "חסר".
+# שיבוצים שכבר קיימים (טיוטה / נשלח) נספרים ולא משתנים.
+# ------------------------------------------------------------
+def build_schedule_proposal(days, rows, admin, per_shift, admin_fill):
+    slots = [(d, k) for d in days for k in SHIFT_TYPES]
+    names = {r["user_id"]: r["full_name"] for r in rows}
+    if admin:
+        names[admin["user_id"]] = admin["full_name"]
+
+    existing = {s: [r["user_id"] for r in rows if r["shift_date"] == s[0].isoformat()
+                    and r["shift_type"] == s[1] and r["status"] in ("planned", "active")] for s in slots}
+    avail = {s: [r["user_id"] for r in rows if r["shift_date"] == s[0].isoformat()
+                 and r["shift_type"] == s[1] and r["status"] == "available"] for s in slots}
+    count = {}
+    for s in slots:
+        for u in existing[s]:
+            count[u] = count.get(u, 0) + 1
+    day_taken = {(d, u) for (d, k), us in existing.items() for u in us}
+    flex = {}
+    for (d, k), us in avail.items():
+        for u in us:
+            flex[(d, u)] = flex.get((d, u), 0) + 1
+
+    new = {s: [] for s in slots}
+    for allow_double in (False, True):
+        for s in slots:
+            d = s[0]
+            need = per_shift - len(existing[s]) - len(new[s])
+            if need <= 0:
+                continue
+            cands = [u for u in avail[s] if u not in new[s] and u not in existing[s]
+                     and (allow_double or (d, u) not in day_taken)]
+            cands.sort(key=lambda u: (count.get(u, 0), flex.get((d, u), 0), names.get(u, "")))
+            for u in cands[:need]:
+                new[s].append(u)
+                count[u] = count.get(u, 0) + 1
+                day_taken.add((d, u))
+
+    items, gaps = [], []
+    for s in slots:
+        for u in new[s]:
+            items.append({"user_id": u, "name": names.get(u, "?"), "date": s[0], "type": s[1], "source": "availability"})
+        missing = per_shift - len(existing[s]) - len(new[s])
+        if missing > 0 and admin_fill and admin and admin["user_id"] not in existing[s] + new[s]:
+            items.append({"user_id": admin["user_id"], "name": admin["full_name"], "date": s[0],
+                          "type": s[1], "source": "admin"})
+            missing -= 1
+        if missing > 0:
+            gaps.append((s, missing))
+
+    # טבלה לתצוגה: יום x משמרת
+    table = []
+    for d in days:
+        row = {"יום": day_label(d)}
+        for k, t in SHIFT_TYPES.items():
+            cell = []
+            for r in rows:
+                if r["shift_date"] == d.isoformat() and r["shift_type"] == k and r["status"] in ("planned", "active"):
+                    cell.append(("✅ " if r["status"] == "active" else "📝 ") + r["full_name"])
+            for it in items:
+                if it["date"] == d and it["type"] == k:
+                    cell.append(("👑 " if it["source"] == "admin" else "✋ ") + it["name"])
+            missing = next((m for (s, m) in gaps if s == (d, k)), 0)
+            if missing:
+                cell.append(f"⚠️ חסר {missing}")
+            row[t["label"]] = ", ".join(cell) or "—"
+        table.append(row)
+    return items, gaps, pd.DataFrame(table).set_index("יום")
+
+def render_schedule_proposal(week_start_iso, user, msgs):
+    start = date.fromisoformat(week_start_iso)
+    days = [start + timedelta(days=i) for i in range(7)]
+    days = [d for d in days if d >= today_il()]
+    if not days:
+        st.caption("השבוע הזה כבר עבר.")
+        return
+    rows = call("get_week_shifts", {"week_start": start.isoformat()}, error="שגיאה בטעינת המשמרות") or []
+
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        per_shift = st.number_input("כמה עובדים בכל משמרת", min_value=1, max_value=5, value=1, key="prop_n")
+        admin_fill = st.toggle("להשלים חוסרים איתי (מנהלת)", value=True, key="prop_fill")
+
+    items, gaps, table = build_schedule_proposal(days, rows, user, int(per_shift), admin_fill)
+    st.table(table)
+    st.caption("✋ לפי זמינות שהעובד שלח · 👑 השלמה שלך · 📝 טיוטה קיימת · ✅ כבר נשלח · ⚠️ חסר")
+    if gaps:
+        st.warning("חסרים עובדים ב-" + ", ".join(
+            f"{day_label(d)} {SHIFT_TYPES[k]['label']}" for (d, k), _ in gaps), icon=":material/warning:")
+    if not items:
+        st.info("אין שיבוצים חדשים להציע - אין זמינויות פתוחות או שהכל כבר משובץ.")
+        return
+
+    with st.container(horizontal=True):
+        if st.button(f"✓ אישור ההצעה ({len(items)} שיבוצים) - נשמר כטיוטה", type="primary",
+                     key=f"approve_{week_start_iso}"):
+            ok = all(assign_shift(it["user_id"], it["date"], it["type"]) is not FAILED for it in items)
+            if ok:
+                msgs.append({"role": "assistant",
+                             "content": "✅ ההצעה נשמרה כ**טיוטה**. העובדים עוד לא רואים אותה. "
+                                        "אפשר לשנות במסך **משמרות**, ואז ללחוץ **שליחת שיבוצים לעובדים**."})
+                st.rerun()
+        if st.button("מעבר ללוח השיבוץ", icon=":material/edit_calendar:", key=f"goto_{week_start_iso}"):
+            st.session_state.goto = "משמרות"
+            st.session_state.week_offset = (start - week_start_for(today_il())).days // 7
+            st.rerun()
 
 def agent_screen(user):
     is_admin = user["role"] == "admin"
@@ -919,6 +1117,9 @@ def agent_screen(user):
             st.markdown(m["content"])
             if m.get("table"):
                 st.dataframe(pd.DataFrame(m["table"]), hide_index=True, alt="נתונים מהסוכן")
+            # הצעת סידור - אינטראקטיבית רק בהודעה האחרונה
+            if m.get("proposal") and i == len(msgs) - 1 and is_admin:
+                render_schedule_proposal(m["proposal"], user, msgs)
             # כפתורי בחירת טלפון - רק בהודעה האחרונה שעוד לא נענתה
             if m.get("ask_device") and i == len(msgs) - 1:
                 with st.container(horizontal=True):
@@ -1225,11 +1426,16 @@ else:
             st.session_state.user = None
             st.rerun()
 
+    # מעבר למסך אחר מתוך כפתור (למשל "מעבר ללוח השיבוץ" אצל הסוכן)
+    if "goto" in st.session_state:
+        st.session_state.nav = st.session_state.pop("goto")
+
     # תפריט ניווט בכפתורים, נשבר לשורות בטלפון
     if is_admin:
         menu = {
             "לוח בקרה": ":material/dashboard:",
             "משמרות": ":material/calendar_month:",
+            "סידור שבועי": ":material/calendar_view_week:",
             "משימות": ":material/task_alt:",
             "מכירות": ":material/payments:",
             "ניהול עובדים": ":material/group:",
@@ -1246,11 +1452,12 @@ else:
             "סוכן AI חכם": ":material/smart_toy:",
         }
 
+    if st.session_state.get("nav") not in menu:
+        st.session_state.nav = "לוח בקרה"
     choice = st.pills(
         "תפריט ניווט",
         list(menu.keys()),
         format_func=lambda name: f"{menu[name]} {name}",
-        default="לוח בקרה",
         required=True,
         key="nav",
         label_visibility="collapsed",
@@ -1264,6 +1471,9 @@ else:
 
     elif choice == "משמרות":
         shifts_screen(user)
+
+    elif choice == "סידור שבועי" and is_admin:
+        weekly_schedule_screen()
 
     elif choice == "משימות":
         tasks_screen(user)
